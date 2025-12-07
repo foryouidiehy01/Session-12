@@ -1,0 +1,200 @@
+CREATE DATABASE ecommerce;
+USE ecommerce;
+
+CREATE TABLE customers (
+    customer_id INT PRIMARY KEY AUTO_INCREMENT,
+    name VARCHAR(255) NOT NULL,
+    email VARCHAR(255) UNIQUE NOT NULL,
+    phone VARCHAR(20),
+    address TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE orders (
+    order_id INT PRIMARY KEY AUTO_INCREMENT,
+    customer_id INT NOT NULL,
+    order_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    total_amount DECIMAL(10,2) DEFAULT 0,
+    status ENUM('Pending', 'Completed', 'Cancelled') DEFAULT 'Pending',
+    FOREIGN KEY (customer_id) REFERENCES customers(customer_id) ON DELETE CASCADE
+);
+
+CREATE TABLE products (
+    product_id INT PRIMARY KEY AUTO_INCREMENT,
+    name VARCHAR(255) NOT NULL,
+    price DECIMAL(10,2) NOT NULL,
+    description TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE order_items (
+    order_item_id INT PRIMARY KEY AUTO_INCREMENT,
+    order_id INT NOT NULL,
+    product_id INT NOT NULL,
+    quantity INT NOT NULL CHECK (quantity > 0),
+    price DECIMAL(10,2) NOT NULL,
+    FOREIGN KEY (order_id) REFERENCES orders(order_id) ON DELETE CASCADE,
+    FOREIGN KEY (product_id) REFERENCES products(product_id)
+);
+
+CREATE TABLE inventory (
+    product_id INT PRIMARY KEY,
+    stock_quantity INT NOT NULL CHECK (stock_quantity >= 0),
+    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (product_id) REFERENCES products(product_id) ON DELETE CASCADE
+);
+
+CREATE TABLE payments (
+    payment_id INT PRIMARY KEY AUTO_INCREMENT,
+    order_id INT NOT NULL,
+    payment_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    amount DECIMAL(10,2) NOT NULL,
+    payment_method ENUM('Credit Card', 'PayPal', 'Bank Transfer', 'Cash') NOT NULL,
+    status ENUM('Pending', 'Completed', 'Failed') DEFAULT 'Pending',
+    FOREIGN KEY (order_id) REFERENCES orders(order_id) ON DELETE CASCADE
+);
+
+INSERT INTO customers (name, email, phone, address)
+VALUES
+('Nguyen Van A', 'a@gmail.com', '0901111111', 'Hanoi'),
+('Tran Thi B', 'b@gmail.com', '0902222222', 'HCM'),
+('Pham Van C', 'c@gmail.com', '0903333333', 'Danang');
+
+INSERT INTO products (name, price, description)
+VALUES
+('iPhone 15', 25000000, 'Apple smartphone'),
+('Samsung Galaxy S24', 22000000, 'Samsung flagship'),
+('MacBook Air M2', 28000000, 'Apple laptop'),
+('iPad Pro 12.9', 30000000, 'Apple tablet'),
+('AirPods Pro 2', 6000000, 'Wireless earbuds');
+
+INSERT INTO inventory (product_id, stock_quantity)
+VALUES
+(1, 50),
+(2, 40),
+(3, 30),
+(4, 20),
+(5, 100);
+
+INSERT INTO orders (customer_id, status, total_amount)
+VALUES
+(1, 'Pending', 0),
+(2, 'Pending', 0),
+(3, 'Completed', 0);
+
+INSERT INTO order_items (order_id, product_id, quantity, price)
+VALUES
+(1, 1, 2, 25000000),
+(1, 5, 3, 6000000);
+
+INSERT INTO order_items (order_id, product_id, quantity, price)
+VALUES
+(2, 3, 1, 28000000),
+(2, 2, 1, 22000000);
+
+INSERT INTO payments (order_id, amount, payment_method, status)
+VALUES
+(1, 68000000, 'Credit Card', 'Completed'),
+(2, 50000000, 'Cash', 'Pending');
+
+-- TRIGGERS
+DELIMITER $$
+
+CREATE TRIGGER check_stock_before_insert
+BEFORE INSERT ON order_items
+FOR EACH ROW
+BEGIN
+    DECLARE stock INT;
+    SELECT stock_quantity INTO stock
+    FROM inventory
+    WHERE product_id = NEW.product_id;
+
+    IF stock < NEW.quantity THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Không đủ hàng trong kho.';
+    END IF;
+
+    UPDATE inventory
+    SET stock_quantity = stock_quantity - NEW.quantity
+    WHERE product_id = NEW.product_id;
+END$$
+
+CREATE TRIGGER update_total_after_insert
+AFTER INSERT ON order_items
+FOR EACH ROW
+BEGIN
+    UPDATE orders
+    SET total_amount = total_amount + (NEW.quantity * NEW.price)
+    WHERE order_id = NEW.order_id;
+END$$
+
+-- BEFORE UPDATE
+CREATE TRIGGER check_stock_before_update
+BEFORE UPDATE ON order_items
+FOR EACH ROW
+BEGIN
+    DECLARE stock INT;
+    DECLARE diff INT;
+
+    SET diff = NEW.quantity - OLD.quantity;
+
+    IF diff > 0 THEN
+        SELECT stock_quantity INTO stock
+        FROM inventory
+        WHERE product_id = NEW.product_id;
+
+        IF stock < diff THEN
+            SIGNAL SQLSTATE '45000'
+                SET MESSAGE_TEXT = 'Không đủ hàng trong kho để cập nhật.';
+        END IF;
+
+        UPDATE inventory
+        SET stock_quantity = stock_quantity - diff
+        WHERE product_id = NEW.product_id;
+    END IF;
+
+    IF diff < 0 THEN
+        UPDATE inventory
+        SET stock_quantity = stock_quantity - diff
+        WHERE product_id = NEW.product_id;
+    END IF;
+END$$
+
+CREATE TRIGGER update_total_after_update
+AFTER UPDATE ON order_items
+FOR EACH ROW
+BEGIN
+    UPDATE orders
+    SET total_amount = total_amount
+        - (OLD.quantity * OLD.price)
+        + (NEW.quantity * NEW.price)
+    WHERE order_id = NEW.order_id;
+END$$
+
+CREATE TRIGGER prevent_delete_completed_order
+BEFORE DELETE ON orders
+FOR EACH ROW
+BEGIN
+    IF OLD.status = 'Completed' THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Không thể xóa đơn hàng đã hoàn thành.';
+    END IF;
+END$$
+
+CREATE TRIGGER restore_stock_after_delete
+AFTER DELETE ON order_items
+FOR EACH ROW
+BEGIN
+    UPDATE inventory
+    SET stock_quantity = stock_quantity + OLD.quantity
+    WHERE product_id = OLD.product_id;
+END$$
+
+DELIMITER ;
+
+UPDATE orders
+SET total_amount = (
+    SELECT IFNULL(SUM(quantity * price), 0)
+    FROM order_items
+    WHERE order_items.order_id = orders.order_id
+);
