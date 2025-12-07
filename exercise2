@@ -1,0 +1,230 @@
+CREATE DATABASE ecommerce;
+USE ecommerce;
+
+CREATE TABLE customers (
+    customer_id INT PRIMARY KEY AUTO_INCREMENT,
+    name VARCHAR(255) NOT NULL,
+    email VARCHAR(255) UNIQUE NOT NULL,
+    phone VARCHAR(20),
+    address TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE orders (
+    order_id INT PRIMARY KEY AUTO_INCREMENT,
+    customer_id INT NOT NULL,
+    order_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    total_amount DECIMAL(10,2) DEFAULT 0,
+    status ENUM('Pending', 'Completed', 'Cancelled') DEFAULT 'Pending',
+    FOREIGN KEY (customer_id) REFERENCES customers(customer_id) ON DELETE CASCADE
+);
+
+CREATE TABLE products (
+    product_id INT PRIMARY KEY AUTO_INCREMENT,
+    name VARCHAR(255) NOT NULL,
+    price DECIMAL(10,2) NOT NULL,
+    description TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 4. Bảng order_items
+CREATE TABLE order_items (
+    order_item_id INT PRIMARY KEY AUTO_INCREMENT,
+    order_id INT NOT NULL,
+    product_id INT NOT NULL,
+    quantity INT NOT NULL CHECK (quantity > 0),
+    price DECIMAL(10,2) NOT NULL,
+    FOREIGN KEY (order_id) REFERENCES orders(order_id) ON DELETE CASCADE,
+    FOREIGN KEY (product_id) REFERENCES products(product_id)
+);
+
+CREATE TABLE inventory (
+    product_id INT PRIMARY KEY,
+    stock_quantity INT NOT NULL CHECK (stock_quantity >= 0),
+    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (product_id) REFERENCES products(product_id) ON DELETE CASCADE
+);
+
+CREATE TABLE payments (
+    payment_id INT PRIMARY KEY AUTO_INCREMENT,
+    order_id INT NOT NULL,
+    payment_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    amount DECIMAL(10,2) NOT NULL,
+    payment_method ENUM('Credit Card', 'PayPal', 'Bank Transfer', 'Cash') NOT NULL,
+    status ENUM('Pending', 'Completed', 'Failed') DEFAULT 'Pending',
+    FOREIGN KEY (order_id) REFERENCES orders(order_id) ON DELETE CASCADE
+);
+
+INSERT INTO customers (name, email, phone, address)
+VALUES
+('Nguyen Van A', 'a@gmail.com', '0901111111', 'Hanoi'),
+('Tran Thi B', 'b@gmail.com', '0902222222', 'HCM'),
+('Pham Van C', 'c@gmail.com', '0903333333', 'Danang');
+
+INSERT INTO products (name, price, description)
+VALUES
+('iPhone 15', 25000000, 'Apple smartphone'),
+('Samsung Galaxy S24', 22000000, 'Samsung flagship'),
+('MacBook Air M2', 28000000, 'Apple laptop'),
+('iPad Pro 12.9', 30000000, 'Apple tablet'),
+('AirPods Pro 2', 6000000, 'Wireless earbuds');
+
+INSERT INTO inventory (product_id, stock_quantity)
+VALUES
+(1, 50),
+(2, 40),
+(3, 30),
+(4, 20),
+(5, 100);
+
+INSERT INTO orders (customer_id, status, total_amount)
+VALUES
+(1, 'Pending', 0),
+(2, 'Pending', 0),
+(3, 'Completed', 0);
+
+INSERT INTO order_items (order_id, product_id, quantity, price)
+VALUES
+(1, 1, 2, 25000000),
+(1, 5, 3, 6000000);
+
+INSERT INTO order_items (order_id, product_id, quantity, price)
+VALUES
+(2, 3, 1, 28000000),
+(2, 2, 1, 22000000);
+
+INSERT INTO payments (order_id, amount, payment_method, status)
+VALUES
+(1, 68000000, 'Credit Card', 'Completed'),
+(2, 50000000, 'Cash', 'Pending');
+
+DELIMITER $$
+
+CREATE PROCEDURE sp_create_order(
+    IN p_customer_id INT,
+    IN p_product_id INT,
+    IN p_quantity INT,
+    IN p_price DECIMAL(10,2)
+)
+BEGIN
+    DECLARE stock INT;
+    DECLARE new_order_id INT;
+    DECLARE msg VARCHAR(255);
+
+    START TRANSACTION;
+
+    SELECT stock_quantity INTO stock
+    FROM inventory
+    WHERE product_id = p_product_id
+    FOR UPDATE;
+
+    IF stock IS NULL THEN
+        SET msg = 'Sản phẩm không tồn tại trong kho.';
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = msg;
+    END IF;
+
+    IF stock < p_quantity THEN
+        SET msg = 'Không đủ hàng trong kho.';
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = msg;
+    END IF;
+    
+    INSERT INTO orders(customer_id, status, total_amount)
+    VALUES (p_customer_id, 'Pending', p_quantity * p_price);
+
+    SET new_order_id = LAST_INSERT_ID();
+
+    INSERT INTO order_items(order_id, product_id, quantity, price)
+    VALUES (new_order_id, p_product_id, p_quantity, p_price);
+
+    UPDATE inventory
+    SET stock_quantity = stock_quantity - p_quantity
+    WHERE product_id = p_product_id;
+
+    COMMIT;
+END$$
+
+DELIMITER ;
+
+
+DELIMITER $$
+
+CREATE PROCEDURE sp_pay_order(
+    IN p_order_id INT,
+    IN p_payment_method VARCHAR(50)
+)
+BEGIN
+    DECLARE current_status VARCHAR(20);
+    DECLARE msg VARCHAR(255);
+    DECLARE total DECIMAL(10,2);
+
+    START TRANSACTION;
+
+    SELECT status, total_amount
+    INTO current_status, total
+    FROM orders
+    WHERE order_id = p_order_id
+    FOR UPDATE;
+
+    IF current_status IS NULL THEN
+        SET msg = 'Đơn hàng không tồn tại.';
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = msg;
+    END IF;
+
+    IF current_status <> 'Pending' THEN
+        SET msg = 'Chỉ đơn hàng Pending mới được thanh toán.';
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = msg;
+    END IF;
+
+    INSERT INTO payments(order_id, amount, payment_method, status)
+    VALUES (p_order_id, total, p_payment_method, 'Completed');
+
+    UPDATE orders
+    SET status = 'Completed'
+    WHERE order_id = p_order_id;
+
+    COMMIT;
+END$$
+
+DELIMITER ;
+
+DELIMITER $$
+
+CREATE PROCEDURE sp_cancel_order(
+    IN p_order_id INT
+)
+BEGIN
+    DECLARE current_status VARCHAR(20);
+    DECLARE msg VARCHAR(255);
+
+    START TRANSACTION;
+
+    SELECT status INTO current_status
+    FROM orders
+    WHERE order_id = p_order_id
+    FOR UPDATE;
+
+    IF current_status IS NULL THEN
+        SET msg = 'Đơn hàng không tồn tại.';
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = msg;
+    END IF;
+
+    IF current_status <> 'Pending' THEN
+        SET msg = 'Chỉ đơn hàng Pending mới được hủy.';
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = msg;
+    END IF;
+    UPDATE inventory i
+    JOIN order_items oi ON i.product_id = oi.product_id
+    SET i.stock_quantity = i.stock_quantity + oi.quantity
+    WHERE oi.order_id = p_order_id;
+
+    DELETE FROM order_items
+    WHERE order_id = p_order_id;
+    UPDATE orders
+    SET status = 'Cancelled'
+    WHERE order_id = p_order_id;
+
+    COMMIT;
+END$$
+
+DELIMITER ;
+
